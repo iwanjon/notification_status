@@ -24,9 +24,7 @@ load_dotenv()
 
 
 def load_pj_mapping(filepath):
-    """Reads the sta_pj.csv file and returns a dictionary mapping station codes to PIC."""
     pj_map = {}
-
     if not filepath or not os.path.exists(filepath):
         logger.warning(f"STA_PJ_FILE not found at '{filepath}'. The PJ column will be blank.")
         return pj_map
@@ -64,7 +62,6 @@ def fetch_qc_summary(date_str):
         return None
 
     url = f"{base_url}/qc/data/summary/{date_str}"
-
     headers = {
         "accept": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -72,7 +69,6 @@ def fetch_qc_summary(date_str):
     }
 
     logger.info(f"Fetching data for date: {date_str}...")
-
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -86,24 +82,14 @@ def fetch_qc_summary(date_str):
 
 
 def get_result_rank(result_string):
-    """Assigns a numeric value to the result to allow mathematical comparison."""
     if not result_string:
         return 0
-
     val = result_string.strip().lower()
-
-    ranks = {
-        "baik": 4,
-        "cukup baik": 3,
-        "buruk": 2,
-        "mati": 1
-    }
-
+    ranks = {"baik": 4, "cukup baik": 3, "buruk": 2, "mati": 1}
     return ranks.get(val, 0)
 
 
-def compare_and_export(start_date, end_date, pj_file_path, output_csv="qc_comparison.csv",
-                       changed_output_csv="qc_comparison_changes.csv"):
+def compare_and_export(start_date, end_date, pj_file_path, output_csv, changed_output_csv):
     pj_mapping = load_pj_mapping(pj_file_path)
 
     data_start = fetch_qc_summary(start_date)
@@ -180,7 +166,6 @@ def compare_and_export(start_date, end_date, pj_file_path, output_csv="qc_compar
 
 
 def send_email_with_attachments(subject, body, recipients, attachments):
-    """Sends an email with the specified attachments to multiple recipients."""
     smtp_server = os.getenv("SMTP_SERVER")
     smtp_port = os.getenv("SMTP_PORT", 587)
     smtp_user = os.getenv("SMTP_USERNAME")
@@ -191,27 +176,19 @@ def send_email_with_attachments(subject, body, recipients, attachments):
         logger.error("Cannot send email. SMTP configuration is missing in .env file.")
         return
 
-    # Create the email message
     msg = MIMEMultipart()
     msg['From'] = sender
     msg['To'] = ", ".join(recipients)
     msg['Subject'] = subject
-
-    # Attach body text
     msg.attach(MIMEText(body, 'plain'))
 
-    # Process attachments
     for filepath in attachments:
         if os.path.exists(filepath):
             try:
                 with open(filepath, "rb") as file:
                     part = MIMEBase("application", "octet-stream")
                     part.set_payload(file.read())
-
-                # Encode file in ASCII characters to send by email
                 encoders.encode_base64(part)
-
-                # Add header with filename
                 filename = os.path.basename(filepath)
                 part.add_header("Content-Disposition", f"attachment; filename= {filename}")
                 msg.attach(part)
@@ -220,7 +197,6 @@ def send_email_with_attachments(subject, body, recipients, attachments):
         else:
             logger.warning(f"File {filepath} not found. Skipping attachment.")
 
-    # Send the email
     logger.info(f"Sending email to {len(recipients)} recipients...")
     try:
         server = smtplib.SMTP(smtp_server, int(smtp_port))
@@ -241,6 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--end_date",
                         help="The target date to compare against (e.g., 2026-08-10). If provided, --start_date is also required.")
     parser.add_argument("--emails", help="Comma-separated list of email addresses to override defaults in .env.")
+    parser.add_argument("--output_dir", help="Directory path to save the CSV files. Overrides OUTPUT_DIR in .env.")
 
     args = parser.parse_args()
 
@@ -254,39 +231,44 @@ if __name__ == "__main__":
 
         final_start_date = start_date_obj.strftime("%Y-%m-%d")
         final_end_date = end_date_obj.strftime("%Y-%m-%d")
-
         logger.info(f"No dates provided. Defaulting to start_date: {final_start_date}, end_date: {final_end_date}")
     else:
         final_start_date = args.start_date
         final_end_date = args.end_date
 
+    # 1. Determine Output Directory (Flag overrides .env)
+    output_dir = args.output_dir if args.output_dir else os.getenv("OUTPUT_DIR", ".")
+
+    # Ensure the output directory exists
+    if output_dir and output_dir != ".":
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"Output directory set to: {output_dir}")
+
     # Retrieve the path to sta_pj.csv from .env
     pj_file_path = os.getenv("STA_PJ_FILE", "sta_pj.csv")
 
-    # Set dynamic output file names based on dates
-    main_csv = f"qc_comparison_{final_start_date}_to_{final_end_date}.csv"
-    changed_csv = f"qc_comparison_changes_{final_start_date}_to_{final_end_date}.csv"
+    # Set dynamic output file names and combine them with the output directory
+    main_csv_name = f"qc_comparison_{final_start_date}_to_{final_end_date}.csv"
+    changed_csv_name = f"qc_comparison_changes_{final_start_date}_to_{final_end_date}.csv"
+
+    main_csv_path = os.path.join(output_dir, main_csv_name)
+    changed_csv_path = os.path.join(output_dir, changed_csv_name)
 
     # Run the comparison
-    success = compare_and_export(final_start_date, final_end_date, pj_file_path, output_csv=main_csv,
-                                 changed_output_csv=changed_csv)
+    success = compare_and_export(final_start_date, final_end_date, pj_file_path, output_csv=main_csv_path,
+                                 changed_output_csv=changed_csv_path)
 
     # Determine which email list to use (Flag overrides .env)
     target_emails_str = args.emails if args.emails else os.getenv("DESTINATION_EMAILS")
 
-    # Send email if target emails exist and comparison was successful
     if success and target_emails_str:
-        # Parse comma-separated emails into a list
         recipient_list = [email.strip() for email in target_emails_str.split(",") if email.strip()]
-
         if recipient_list:
             subject = f"QC Comparison Report: {final_start_date} to {final_end_date}"
             body = f"Hello,\n\nPlease find the attached QC comparison reports for the period from {final_start_date} to {final_end_date}.\n\n- The main file contains all stations.\n- The 'changes' file contains only stations where the status changed.\n\nRegards,\nAutomated QC System"
 
-            attachments = [main_csv, changed_csv]
+            attachments = [main_csv_path, changed_csv_path]
 
             send_email_with_attachments(subject, body, recipient_list, attachments)
         else:
             logger.warning("Target emails string was empty after parsing. No email sent.")
-    elif success and not target_emails_str:
-        logger.info("No destination emails provided via --emails flag or .env file. Skipping email dispatch.")
